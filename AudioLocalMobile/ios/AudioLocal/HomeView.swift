@@ -32,9 +32,8 @@ private struct NightGlassGroup<Content: View>: View {
     private let content: Content
     init(@ViewBuilder content: () -> Content) { self.content = content() }
     @ViewBuilder var body: some View {
-        if #available(iOS 26.0, *), !reduceTransparency {
-            GlassEffectContainer(spacing: 8) { content }
-        } else { content }
+        // GlassEffectContainer 需要 iOS 26 SDK；此构建用 Xcode 16，改为同层级直出
+        content
     }
 }
 
@@ -48,9 +47,6 @@ private struct NightSurface: ViewModifier {
         if reduceTransparency {
             content.background(prominent ? BackdoorTheme.prominent : BackdoorTheme.surface, in: shape)
                 .overlay(shape.strokeBorder(.white.opacity(prominent ? 0.28 : 0.12), lineWidth: 0.75).allowsHitTesting(false))
-        } else if #available(iOS 26.0, *) {
-            content.glassEffect(.regular.tint(.white.opacity(prominent ? 0.16 : 0.035)).interactive(interactive),
-                                in: .rect(cornerRadius: radius))
         } else {
             content.background(.ultraThinMaterial, in: shape)
                 .background(prominent ? BackdoorTheme.prominent.opacity(0.85) : BackdoorTheme.surface.opacity(0.45), in: shape)

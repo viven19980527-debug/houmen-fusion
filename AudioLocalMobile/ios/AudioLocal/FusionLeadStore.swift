@@ -54,9 +54,18 @@ final class FusionLeadStore: ObservableObject {
         // Original Houmen observations take precedence without copying or overwriting their file.
         for lead in records where byID[lead.id] == nil { byID[lead.id] = lead }
         projectedDefaults = defaults
-        return byID.map { (id: $0.key, lead: $0.value, date: FusionDates.parse($0.value.collectedAt) ?? .distantPast) }
-            .sorted { a, b in a.date == b.date ? a.id < b.id : a.date > b.date }
-            .map { $0.lead }
+        struct Entry { let id: String; let lead: FusionLead; let date: Date }
+        var entries: [Entry] = []
+        entries.reserveCapacity(byID.count)
+        for (id, lead) in byID {
+            let parsed: Date = FusionDates.parse(lead.collectedAt) ?? Date.distantPast
+            entries.append(Entry(id: id, lead: lead, date: parsed))
+        }
+        let sorted = entries.sorted { lhs, rhs in
+            if lhs.date == rhs.date { return lhs.id < rhs.id }
+            return lhs.date > rhs.date
+        }
+        return sorted.map { $0.lead }
     }
 
     func followup(for lead: FusionLead) -> FusionFollowup {
