@@ -1,0 +1,13 @@
+{
+  "name": "audio-local-mobile",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test ios/Verification/*.test.mjs tests/ios-*.test.mjs",
+    "build:protocol": "node tools/build-ios-protocol.mjs"
+  },
+  "devDependencies": {
+    "linkedom": "0.18.14"
+  }
+}

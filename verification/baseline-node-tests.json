@@ -1,0 +1,11 @@
+{
+  "command": "npm ci --ignore-scripts --no-audit --no-fund; npm test",
+  "dependency_install_exit_code": 0,
+  "packages_added": 20,
+  "test_exit_code": 0,
+  "tests": 209,
+  "pass": 209,
+  "fail": 0,
+  "skipped": 0,
+  "scope": "Baseline Node synthetic DOM and source assertions before fusion model/UI changes. No Swift or device tests."
+}

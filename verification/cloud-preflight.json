@@ -1,0 +1,21 @@
+{
+  "scope": "Read-only authenticated service availability checks; no uploads, pushes, build dispatches or credential disclosure.",
+  "observed_at": "2026-11-04T17:00:31.372060+00:00",
+  "codemagic": {
+    "saved_credential_present": true,
+    "existing_app_identity_matches": true,
+    "read_only_app_get": "success"
+  },
+  "github": {
+    "saved_credential_present": true,
+    "existing_repository_get_http": 403,
+    "server_message": "Sorry. Your account was suspended"
+  },
+  "build_dispatch": "not_attempted",
+  "source_upload": "not_attempted",
+  "next_action": "Resolve account status through provider or explicitly authorize a different legitimate build route. Do not bypass suspension.",
+  "limitations": [
+    "Codemagic app metadata access does not establish a successful future build or available billing capacity.",
+    "The prior cloud source route is blocked by GitHub account suspension."
+  ]
+}

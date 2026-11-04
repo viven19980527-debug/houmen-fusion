@@ -1,0 +1,61 @@
+name: build-ipa
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build HoumenFusion unsigned IPA
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Build (unsigned)
+        working-directory: AudioLocalMobile/ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project AudioLocal.xcodeproj \
+            -scheme AudioLocal \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log
+          echo "----- errors -----"
+          grep -nE "error:" build.log | head -40 || echo "(no error)"
+
+      - name: Package IPA
+        working-directory: AudioLocalMobile/ios
+        run: |
+          set -e
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          echo "app: $APP"
+          test -n "$APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry HoumenFusion-unsigned.ipa Payload
+          ls -lh HoumenFusion-unsigned.ipa
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HoumenFusion-unsigned-ipa
+          path: AudioLocalMobile/ios/HoumenFusion-unsigned.ipa
+          if-no-files-found: error

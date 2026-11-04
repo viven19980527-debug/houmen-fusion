@@ -1,0 +1,18 @@
+workflows:
+  audio-local-ios:
+    name: Houmen Fusion 0.2.0 - verified unsigned iOS build
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+    environment:
+      xcode: '26.6'
+    scripts:
+      - name: Offline regression, native fixtures and iPhone build
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          bash AudioLocalMobile/ios/verify-fusion.sh
+    artifacts:
+      - AudioLocalMobile/ios/build/HoumenFusion-unsigned.ipa
+      - AudioLocalMobile/ios/build/fusion-provenance.json
+      - AudioLocalMobile/ios/build/fusion-*/*.log
+      - AudioLocalMobile/ios/build/fusion-*/checks.jsonl

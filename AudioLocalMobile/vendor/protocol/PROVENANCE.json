@@ -1,0 +1,17 @@
+{
+  "upstream": "lead-protocol-capture/0.1.2",
+  "localRevision": "houmen.1",
+  "note": "User-supplied protocol source plus delivery safety fixes; vendored without changes. Browser bridge is separate. No live-platform or iPhone acceptance claimed.",
+  "files": [
+    {
+      "file": "hook-capture.js",
+      "sha256": "88dbc7aa1e472cb966fb683ea8e5a11bfd2404b43cdfbc3553d6f57392a17dc1",
+      "source": "C:\\Users\\Viven\\Documents\\Codex\\2026-10-24\\len\\outputs\\lead-api-delivery-20261027\\protocol\\hook-capture.js"
+    },
+    {
+      "file": "parse.mjs",
+      "sha256": "2984208c76084b5bed8b2382ac1d6636ba0e6742fc72bf538931d47ce1bffa20",
+      "source": "C:\\Users\\Viven\\Documents\\Codex\\2026-10-24\\len\\outputs\\lead-api-delivery-20261027\\protocol\\src\\parse.mjs"
+    }
+  ]
+}
