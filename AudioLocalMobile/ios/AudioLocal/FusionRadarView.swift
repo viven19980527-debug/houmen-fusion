@@ -170,6 +170,7 @@ struct UnifiedCaptureView: View {
     @State private var runningPlatform: AuthPlatform?
     @State private var logLines: [String] = []
     @State private var busy = false
+    @State private var showAdvanced = false
 
     private var term: String { keyword.trimmingCharacters(in: .whitespacesAndNewlines) }
 
@@ -261,7 +262,21 @@ struct UnifiedCaptureView: View {
             }
             .scrollContentBackground(.hidden)
             .background(BackdoorTheme.background)
-            .navigationTitle("统一采集")
+            .navigationTitle("采集")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Menu {
+                        Button("精细采集（高级流程）") { showAdvanced = true }
+                        Button("打开 B站搜索页") { openSearch(.bilibili) }
+                        Button("打开抖音搜索页") { openSearch(.douyin) }
+                    } label: { Image(systemName: "ellipsis.circle") }
+                }
+            }
+            .sheet(isPresented: $showAdvanced) {
+                NavigationStack { HomeView() }
+                    .environmentObject(store)
+                    .environmentObject(fusion)
+            }
             .sheet(item: $loginTarget) { p in
                 PlatformLoginView(platform: p)
             }
@@ -291,29 +306,64 @@ struct UnifiedCaptureView: View {
         }()
         NavigationStack {
             VStack(spacing: 0) {
-                Text(c.stage).font(.caption).frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8).background(Color.blue.opacity(0.12))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(c.stage).font(.caption).bold()
+                    Text(c.runSummary).font(.caption2).foregroundStyle(.secondary)
+                    if c.progress > 0 {
+                        ProgressView(value: c.progress).progressViewStyle(.linear)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color.blue.opacity(0.12))
+
                 CollectorWebView(webView: c.webView)
-            }
-            .navigationTitle("\(p.title) 采集")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+
+                HStack(spacing: 8) {
+                    if c.running {
+                        Button(role: .destructive) {
+                            c.stop()
+                            log("\(p.title)：已暂停（可续采）")
+                        } label: { Label("暂停", systemImage: "pause.fill") }
+                        .buttonStyle(.bordered)
+                    } else if c.canResume {
+                        Button {
+                            c.resume()
+                            log("\(p.title)：继续采集")
+                        } label: { Label("继续", systemImage: "play.fill") }
+                        .buttonStyle(.borderedProminent)
+                    } else {
+                        Button {
+                            startCollector(c, p)
+                        } label: { Label("开始", systemImage: "play.fill") }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    Button {
+                        c.saveVisiblePage()
+                        log("\(p.title)：已保存当前页")
+                    } label: { Label("存当前页", systemImage: "square.and.arrow.down") }
+                    .buttonStyle(.bordered)
+                    Spacer()
                     Button("完成") {
                         c.stop()
                         runningPlatform = nil
-                        log("\(p.title)：已停止")
+                        log("\(p.title)：结束，结果已进「线索工作台」")
                     }.bold()
                 }
+                .padding(8)
             }
-            .onAppear {
-                log("\(p.title)：开始采集…")
-                if p == .douyin {
-                    c.start(keyword: term, recency: .all, industry: .general, platform: .douyin)
-                } else {
-                    c.start(keyword: term, recency: .all, industry: .general, platform: .xiaohongshu)
-                }
-            }
+            .navigationTitle("\(p.title) 采集")
+            .navigationBarTitleDisplayMode(.inline)
+            .onAppear { if !c.running && !c.canResume { startCollector(c, p) } }
+        }
+    }
+
+    private func startCollector(_ c: BrowserCollector, _ p: AuthPlatform) {
+        log("\(p.title)：开始采集…")
+        if p == .douyin {
+            c.start(keyword: term, recency: .all, industry: .general, platform: .douyin)
+        } else {
+            c.start(keyword: term, recency: .all, industry: .general, platform: .xiaohongshu)
         }
     }
 
@@ -346,6 +396,12 @@ struct UnifiedCaptureView: View {
                 log("全部完成。结果在「线索工作台」")
                 refreshAll()
             }
+        }
+    }
+
+    private func openSearch(_ p: AuthPlatform) {
+        if let url = URL(string: p.loginURL.replacingOccurrences(of: "/login", with: "")) {
+            UIApplication.shared.open(url)
         }
     }
 
