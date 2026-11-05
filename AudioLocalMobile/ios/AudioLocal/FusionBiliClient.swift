@@ -317,8 +317,9 @@ final class FusionBiliClient: ObservableObject {
                 request.setValue(Self.browserUA, forHTTPHeaderField: "User-Agent")
                 request.setValue("https://www.bilibili.com/", forHTTPHeaderField: "Referer")
                 request.setValue("https://www.bilibili.com", forHTTPHeaderField: "Origin")
-                if !guestCookie.isEmpty {
-                    request.setValue(guestCookie, forHTTPHeaderField: "Cookie")
+                let cookie = BiliAuth.isLoggedIn ? BiliAuth.cookieHeader : guestCookie
+                if !cookie.isEmpty {
+                    request.setValue(cookie, forHTTPHeaderField: "Cookie")
                 }
                 let (bytes, response) = try await session.bytes(for: request)
                 guard let http = response as? HTTPURLResponse, let finalURL = http.url,
@@ -337,8 +338,10 @@ final class FusionBiliClient: ObservableObject {
                 }
                 return try FusionBiliParsing.envelope(data)
             }
-            // 先取匿名访客标识（buvid3/buvid4）；不带 cookie 时 B站 会返回 -101
-            await bootstrapGuestCookie(session)
+            // 已登录用登录 cookie；否则引导访客标识（B站 无 cookie 会返回 -101）
+            if !BiliAuth.isLoggedIn {
+                await bootstrapGuestCookie(session)
+            }
             guard let nav = URL(string: "https://api.bilibili.com/x/web-interface/nav") else {
                 throw FusionBiliError.invalidURL
             }
@@ -375,5 +378,139 @@ final class FusionBiliClient: ObservableObject {
                 progress = "请求已中止：收到 \(received) 条，成功新增 \(stored) 条；已有线索未清空，不代表采集完成。"
             }
         }
+    }
+}
+
+
+// MARK: - B站登录态（本机保存，仅用于公开接口的访客身份）
+
+import WebKit
+
+enum BiliAuth {
+
+    private static let keySESSDATA = "bili.SESSDATA"
+    private static let keyBiliJct  = "bili.bili_jct"
+    private static let keyBuvid3   = "bili.buvid3"
+    private static let keyBuvid4   = "bili.buvid4"
+    private static let keyDedeUID  = "bili.DedeUserID"
+    private static let keySavedAt  = "bili.savedAt"
+
+    static var sessdata: String { UserDefaults.standard.string(forKey: keySESSDATA) ?? "" }
+    static var isLoggedIn: Bool { !sessdata.isEmpty }
+
+    static var savedAt: Date? {
+        let t = UserDefaults.standard.double(forKey: keySavedAt)
+        return t > 0 ? Date(timeIntervalSince1970: t) : nil
+    }
+
+    /// 组装 Cookie 头：登录态优先，没有就只带访客标识
+    static var cookieHeader: String {
+        var parts: [String] = []
+        let ud = UserDefaults.standard
+        if let v = ud.string(forKey: keySESSDATA), !v.isEmpty { parts.append("SESSDATA=" + v) }
+        if let v = ud.string(forKey: keyBiliJct),  !v.isEmpty { parts.append("bili_jct=" + v) }
+        if let v = ud.string(forKey: keyDedeUID),  !v.isEmpty { parts.append("DedeUserID=" + v) }
+        if let v = ud.string(forKey: keyBuvid3),   !v.isEmpty { parts.append("buvid3=" + v) }
+        if let v = ud.string(forKey: keyBuvid4),   !v.isEmpty { parts.append("buvid4=" + v) }
+        return parts.joined(separator: "; ")
+    }
+
+    /// 从 WKWebView cookie 仓库同步
+    static func syncFromWebKit() async -> Bool {
+        let store = WKWebsiteDataStore.default().httpCookieStore
+        let cookies: [HTTPCookie] = await withCheckedContinuation { cont in
+            store.getAllCookies { cont.resume(returning: $0) }
+        }
+        var found: [String: String] = [:]
+        for c in cookies where c.domain.contains("bilibili.com") {
+            found[c.name] = c.value
+        }
+        let ud = UserDefaults.standard
+        if let v = found["SESSDATA"], !v.isEmpty { ud.set(v, forKey: keySESSDATA) }
+        if let v = found["bili_jct"] { ud.set(v, forKey: keyBiliJct) }
+        if let v = found["DedeUserID"] { ud.set(v, forKey: keyDedeUID) }
+        if let v = found["buvid3"] { ud.set(v, forKey: keyBuvid3) }
+        if let v = found["buvid4"] { ud.set(v, forKey: keyBuvid4) }
+        if !sessdata.isEmpty {
+            ud.set(Date().timeIntervalSince1970, forKey: keySavedAt)
+            return true
+        }
+        return false
+    }
+
+    static func signOut() {
+        let ud = UserDefaults.standard
+        for k in [keySESSDATA, keyBiliJct, keyBuvid3, keyBuvid4, keyDedeUID, keySavedAt] {
+            ud.removeObject(forKey: k)
+        }
+    }
+}
+
+// MARK: - B站登录页
+
+struct BiliLoginView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var done = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Text(done ? "已识别登录态，点右上角「完成」"
+                          : "在下方登录 B站（扫码或账号密码），登录成功会自动识别")
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(done ? Color.green.opacity(0.15) : Color.blue.opacity(0.12))
+                BiliLoginWeb(onLoggedIn: { done = true })
+            }
+            .navigationTitle("B站登录")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("完成") { dismiss() }.bold()
+                }
+            }
+        }
+    }
+}
+
+private struct BiliLoginWeb: UIViewRepresentable {
+    let onLoggedIn: () -> Void
+
+    func makeCoordinator() -> Coord { Coord(self) }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        cfg.websiteDataStore = .default()
+        let wv = WKWebView(frame: .zero, configuration: cfg)
+        wv.navigationDelegate = context.coordinator
+        if let u = URL(string: "https://passport.bilibili.com/login") {
+            wv.load(URLRequest(url: u))
+        }
+        context.coordinator.startPolling()
+        return wv
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    final class Coord: NSObject, WKNavigationDelegate {
+        let parent: BiliLoginWeb
+        private var timer: Timer?
+        init(_ p: BiliLoginWeb) { parent = p }
+
+        func startPolling() {
+            timer?.invalidate()
+            timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+                Task {
+                    if await BiliAuth.syncFromWebKit() {
+                        self?.timer?.invalidate()
+                        self?.timer = nil
+                        await MainActor.run { self?.parent.onLoggedIn() }
+                    }
+                }
+            }
+        }
+
+        deinit { timer?.invalidate() }
     }
 }

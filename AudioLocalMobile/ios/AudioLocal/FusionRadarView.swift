@@ -10,6 +10,8 @@ struct FusionRadarView: View {
     @State private var limit = 50
     @State private var searchTask: Task<Void, Never>?
     @State private var browser: FusionSearchPage?
+    @State private var showBiliLogin = false
+    @State private var loggedIn = BiliAuth.isLoggedIn
 
     private var term: String { keyword.trimmingCharacters(in: .whitespacesAndNewlines) }
 
@@ -27,6 +29,21 @@ struct FusionRadarView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 Section("B站公开评论 · 实验性接口") {
+                    HStack {
+                        Image(systemName: loggedIn ? "checkmark.seal.fill" : "person.crop.circle.badge.exclamationmark")
+                            .foregroundStyle(loggedIn ? .green : .orange)
+                        Text(loggedIn ? "B站已登录" : "B站未登录（会返回 -101）")
+                        Spacer()
+                        Button(loggedIn ? "重新登录" : "登录") { showBiliLogin = true }
+                            .font(.callout)
+                    }
+                    if loggedIn {
+                        Button("清除登录态", role: .destructive) {
+                            BiliAuth.signOut(); loggedIn = false
+                        }.font(.caption)
+                    }
+                    Text("未登录时 B站 会拒绝公开接口（code=-101）。登录只保存在本机，仅用于通过访客校验，不上传。")
+                        .font(.caption2).foregroundStyle(.secondary)
                     Picker("本轮最多读取", selection: $limit) {
                         Text("20 条").tag(20)
                         Text("50 条").tag(50)
@@ -66,6 +83,12 @@ struct FusionRadarView: View {
             .scrollContentBackground(.hidden).background(BackdoorTheme.background)
             .navigationTitle("获客雷达")
             .sheet(item: $browser) { page in FusionSafariView(url: page.url) }
+            .sheet(isPresented: $showBiliLogin) {
+                BiliLoginView()
+            }
+            .onChange(of: showBiliLogin) { _, presenting in
+                if !presenting { loggedIn = BiliAuth.isLoggedIn }
+            }
             .onDisappear(perform: stop)
         }
     }
