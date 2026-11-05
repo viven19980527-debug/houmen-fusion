@@ -49,7 +49,8 @@ struct FusionBiliVideo {
 enum FusionBiliParsing {
     static let maximumResponseBytes = 2 * 1024 * 1024
     static let allowedPaths: Set<String> = [
-        "/x/web-interface/nav", "/x/web-interface/wbi/search/type", "/x/v2/reply/wbi/main"
+        "/x/web-interface/nav", "/x/web-interface/wbi/search/type", "/x/v2/reply/wbi/main",
+        "/x/space/wbi/arc/search"
     ]
     private static let mixinTable = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,
         27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,
@@ -142,6 +143,39 @@ enum FusionBiliParsing {
         return ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: seconds))
     }
 
+    // MARK: 时效判断
+
+    /// publishedAt 是 ISO 字符串；返回是否在 hours 小时内
+    static func withinHours(_ iso: String?, hours: Int) -> Bool {
+        guard let iso = iso, !iso.isEmpty else { return false }
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        guard let d = f.date(from: iso) else { return false }
+        return Date().timeIntervalSince(d) <= Double(hours) * 3600
+    }
+
+    // MARK: 空间视频列表（账号订阅）
+
+    /// 解析 /x/space/wbi/arc/search 的 data.list.vlist
+    static func userVideos(_ payload: [String: Any], mid: String,
+                           maxAgeHours: Int?, now: Date) throws -> [FusionBiliVideo] {
+        guard let data = payload["data"] as? [String: Any],
+              let list = data["list"] as? [String: Any],
+              let vlist = list["vlist"] as? [Any] else { return [] }
+        var out: [FusionBiliVideo] = []
+        for row in vlist.prefix(5) {
+            guard let item = row as? [String: Any],
+                  let aid = decimalID(item["aid"]),
+                  let bvid = item["bvid"] as? String,
+                  let title = item["title"] as? String else { continue }
+            let iso = isoDate(item["created"], now: now)
+            if let h = maxAgeHours, h > 0, !withinHours(iso, hours: h) { continue }
+            let plain = title.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+            out.append(FusionBiliVideo(aid: aid, bvid: bvid, title: plain, publishedAt: iso))
+        }
+        return out
+    }
+
     static func videos(_ payload: [String: Any], now: Date) throws -> [FusionBiliVideo] {
         guard let raw = payload["result"] as? [Any] else { throw FusionBiliError.invalidResponse }
         var result: [FusionBiliVideo] = []
@@ -223,7 +257,10 @@ final class FusionBiliClient: ObservableObject {
         activeSession?.invalidateAndCancel()
     }
 
-    func search(keyword: String, limit: Int = 50, onBatch: @escaping ([FusionLead]) throws -> Int) async {
+    func search(keyword: String, limit: Int = 50,
+                maxAgeHours: Int? = nil,
+                monitorMids: [String] = [],
+                onBatch: @escaping ([FusionLead]) throws -> Int) async {
         guard !running else { return }
         let term = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty, term.count <= 100 else {
@@ -233,7 +270,9 @@ final class FusionBiliClient: ObservableObject {
         running = true; errorText = ""; progress = "准备公开接口请求…"
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.perform(keyword: term, limit: min(100, max(1, limit)), onBatch: onBatch)
+            await self.perform(keyword: term, limit: min(100, max(1, limit)),
+                               maxAgeHours: maxAgeHours, monitorMids: monitorMids,
+                               onBatch: onBatch)
         }
         worker = task
         await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
@@ -288,7 +327,9 @@ final class FusionBiliClient: ObservableObject {
         }
     }
 
-    private func perform(keyword: String, limit: Int, onBatch: ([FusionLead]) throws -> Int) async {
+    private func perform(keyword: String, limit: Int, maxAgeHours: Int? = nil,
+                         monitorMids: [String] = [],
+                         onBatch: ([FusionLead]) throws -> Int) async {
         let config = URLSessionConfiguration.ephemeral
         config.httpCookieStorage = nil
         config.httpShouldSetCookies = false
@@ -351,7 +392,40 @@ final class FusionBiliClient: ObservableObject {
                 parameters: ["search_type": "video", "keyword": keyword, "page": "1", "page_size": "20", "order": "pubdate"],
                 key: key, timestamp: Int(Date().timeIntervalSince1970))
             progress = "读取公开搜索结果（最多 10 个视频）…"
-            let videos = try FusionBiliParsing.videos(try await get(searchURL), now: Date())
+            var videos = try FusionBiliParsing.videos(try await get(searchURL), now: Date())
+
+            // A. 新帖狙击：只保留 N 小时内发布的视频
+            if let hours = maxAgeHours, hours > 0 {
+                let before = videos.count
+                videos = videos.filter { FusionBiliParsing.withinHours($0.publishedAt, hours: hours) }
+                progress = "时效过滤（\(hours)h 内）：\(before) → \(videos.count) 个视频"
+                if videos.isEmpty {
+                    progress = "\(hours) 小时内没有新视频；可放宽时效或换关键词"
+                }
+            }
+
+            // B. 竞品/账号订阅：把监控账号的最新视频拼到最前面
+            if !monitorMids.isEmpty {
+                var extra: [FusionBiliVideo] = []
+                for mid in monitorMids.prefix(10) {
+                    try Task.checkCancellation()
+                    let spaceURL = try FusionBiliParsing.signedURL(path: "/x/space/wbi/arc/search",
+                        parameters: ["mid": mid, "ps": "5", "pn": "1", "order": "pubdate",
+                                     "platform": "web", "web_location": "1550101"],
+                        key: key, timestamp: Int(Date().timeIntervalSince1970))
+                    if let found = try? FusionBiliParsing.userVideos(try await get(spaceURL),
+                                                                    mid: mid,
+                                                                    maxAgeHours: maxAgeHours,
+                                                                    now: Date()) {
+                        extra.append(contentsOf: found)
+                    }
+                }
+                if !extra.isEmpty {
+                    var seenB = Set(videos.map { $0.bvid })
+                    for v in extra where seenB.insert(v.bvid).inserted { videos.insert(v, at: 0) }
+                    progress = "监控账号补入 \(extra.count) 个视频，共 \(videos.count) 个"
+                }
+            }
             for (index, video) in videos.enumerated() {
                 try Task.checkCancellation()
                 guard received < limit else { break }

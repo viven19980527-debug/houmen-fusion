@@ -171,6 +171,9 @@ struct UnifiedCaptureView: View {
     @State private var logLines: [String] = []
     @State private var busy = false
     @State private var showAdvanced = false
+    @AppStorage("cap.maxAgeHours") private var maxAgeHours = 0        // 0=不限
+    @AppStorage("cap.monitorMids") private var monitorRaw = ""        // 逗号分隔 UID
+    @State private var newMid = ""
 
     private var term: String { keyword.trimmingCharacters(in: .whitespacesAndNewlines) }
 
@@ -184,6 +187,43 @@ struct UnifiedCaptureView: View {
                         Text("20 条").tag(20)
                         Text("50 条").tag(50)
                         Text("100 条").tag(100)
+                    }
+                }
+
+                Section("新帖狙击 · 发布时效") {
+                    Picker("只看", selection: $maxAgeHours) {
+                        Text("不限").tag(0)
+                        Text("2 小时内").tag(2)
+                        Text("6 小时内").tag(6)
+                        Text("24 小时内").tag(24)
+                        Text("3 天内").tag(72)
+                    }
+                    Text("只采最近发布的视频：同行还没反应过来，评论区竞争最少。B站按视频发布时间过滤；抖音/小红书在采集器里按来源日期核验。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
+                Section("竞品账号订阅（B站 UID）") {
+                    HStack {
+                        TextField("输入 UID，如 4384200", text: $newMid)
+                            .keyboardType(.numberPad)
+                        Button("添加") { addMid() }
+                            .disabled(newMid.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                    let mids = monitorList
+                    if mids.isEmpty {
+                        Text("还没有监控账号。把你关注的同行 UID 加进来，每次采集会先扫他们最新的视频。")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    } else {
+                        ForEach(mids, id: \.self) { mid in
+                            HStack {
+                                Text(mid).font(.body.monospaced())
+                                Spacer()
+                                Button("删除") { removeMid(mid) }
+                                    .font(.caption).foregroundStyle(.red)
+                            }
+                        }
+                        Text("共 \(mids.count) 个账号 · 每个最多取 5 个最新视频")
+                            .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
 
@@ -379,7 +419,9 @@ struct UnifiedCaptureView: View {
                 if !AuthPlatform.bilibili.isLoggedIn {
                     log("B站：未登录，可能返回 -101")
                 }
-                await bili.search(keyword: term, limit: limit) { rows in
+                await bili.search(keyword: term, limit: limit,
+                                  maxAgeHours: maxAgeHours > 0 ? maxAgeHours : nil,
+                                  monitorMids: monitorList) { rows in
                     try fusion.add(rows)
                 }
                 log("B站：完成，\(bili.progress)")
@@ -403,6 +445,24 @@ struct UnifiedCaptureView: View {
         if let url = URL(string: p.loginURL.replacingOccurrences(of: "/login", with: "")) {
             UIApplication.shared.open(url)
         }
+    }
+
+    private var monitorList: [String] {
+        monitorRaw.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func addMid() {
+        let v = newMid.trimmingCharacters(in: .whitespaces)
+        guard !v.isEmpty, !monitorList.contains(v) else { newMid = ""; return }
+        monitorRaw = (monitorList + [v]).joined(separator: ",")
+        newMid = ""
+        log("已添加监控账号 \(v)")
+    }
+
+    private func removeMid(_ mid: String) {
+        monitorRaw = monitorList.filter { $0 != mid }.joined(separator: ",")
+        log("已移除监控账号 \(mid)")
     }
 
     private func log(_ s: String) {
