@@ -535,6 +535,9 @@ enum AuthPlatform: String, CaseIterable, Identifiable {
         case .xhs:      return "https://www.xiaohongshu.com/login"
         }
     }
+    /// SwiftUI 用：该平台是否已登录
+    var isLoggedIn: Bool { PlatformAuth.isLoggedIn(self) }
+
     /// 判定"已登录"的 cookie 键（任一存在即可）
     var sessionKeys: [String] {
         switch self {

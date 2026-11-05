@@ -196,7 +196,7 @@ struct UnifiedCaptureView: View {
                                     .foregroundStyle(picked.contains(p) ? Color.accentColor : .secondary)
                                 Text(p.title)
                                 Spacer()
-                                if AuthPlatform.isLoggedIn(p) {
+                                if p.isLoggedIn {
                                     Text("已登录").font(.caption2).foregroundStyle(.green)
                                 } else {
                                     Text("未登录").font(.caption2).foregroundStyle(.orange)
@@ -210,15 +210,15 @@ struct UnifiedCaptureView: View {
                 Section("登录（三个平台同一套流程）") {
                     ForEach(AuthPlatform.allCases) { p in
                         HStack {
-                            Image(systemName: AuthPlatform.isLoggedIn(p)
+                            Image(systemName: p.isLoggedIn
                                   ? "checkmark.seal.fill" : "person.crop.circle.badge.exclamationmark")
-                                .foregroundStyle(AuthPlatform.isLoggedIn(p) ? .green : .orange)
+                                .foregroundStyle(p.isLoggedIn ? .green : .orange)
                             Text(p.title)
                             Spacer()
-                            Button(AuthPlatform.isLoggedIn(p) ? "重新登录" : "登录") {
+                            Button(p.isLoggedIn ? "重新登录" : "登录") {
                                 loginTarget = p
                             }
-                            if AuthPlatform.isLoggedIn(p) {
+                            if p.isLoggedIn {
                                 Button("清除") { PlatformAuth.signOut(p); refreshAll() }
                                     .font(.caption).foregroundStyle(.red)
                             }
@@ -325,8 +325,8 @@ struct UnifiedCaptureView: View {
         log("开始：\(picked.map { $0.title }.joined(separator: "、")) · 关键词「\(term)」")
         Task {
             // 1) B站：原生
-            if picked.contains(.bilibili) {
-                if !AuthPlatform.isLoggedIn(.bilibili) {
+            if picked.contains(AuthPlatform.bilibili) {
+                if !AuthPlatform.bilibili.isLoggedIn {
                     log("B站：未登录，可能返回 -101")
                 }
                 await bili.search(keyword: term, limit: limit) { rows in
