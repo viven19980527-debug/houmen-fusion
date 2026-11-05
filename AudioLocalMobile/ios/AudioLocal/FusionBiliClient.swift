@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import CoreFoundation
 import Combine
 import CryptoKit
@@ -415,27 +416,24 @@ enum BiliAuth {
         return parts.joined(separator: "; ")
     }
 
-    /// 从 WKWebView cookie 仓库同步
-    static func syncFromWebKit() async -> Bool {
+    /// 从 WKWebView cookie 仓库同步（回调版，避免并发捕获问题）
+    static func syncFromWebKit(_ done: @escaping (Bool) -> Void) {
         let store = WKWebsiteDataStore.default().httpCookieStore
-        let cookies: [HTTPCookie] = await withCheckedContinuation { cont in
-            store.getAllCookies { cont.resume(returning: $0) }
+        store.getAllCookies { cookies in
+            var found: [String: String] = [:]
+            for c in cookies where c.domain.contains("bilibili.com") {
+                found[c.name] = c.value
+            }
+            let ud = UserDefaults.standard
+            if let v = found["SESSDATA"], !v.isEmpty { ud.set(v, forKey: keySESSDATA) }
+            if let v = found["bili_jct"] { ud.set(v, forKey: keyBiliJct) }
+            if let v = found["DedeUserID"] { ud.set(v, forKey: keyDedeUID) }
+            if let v = found["buvid3"] { ud.set(v, forKey: keyBuvid3) }
+            if let v = found["buvid4"] { ud.set(v, forKey: keyBuvid4) }
+            let ok = !sessdata.isEmpty
+            if ok { ud.set(Date().timeIntervalSince1970, forKey: keySavedAt) }
+            DispatchQueue.main.async { done(ok) }
         }
-        var found: [String: String] = [:]
-        for c in cookies where c.domain.contains("bilibili.com") {
-            found[c.name] = c.value
-        }
-        let ud = UserDefaults.standard
-        if let v = found["SESSDATA"], !v.isEmpty { ud.set(v, forKey: keySESSDATA) }
-        if let v = found["bili_jct"] { ud.set(v, forKey: keyBiliJct) }
-        if let v = found["DedeUserID"] { ud.set(v, forKey: keyDedeUID) }
-        if let v = found["buvid3"] { ud.set(v, forKey: keyBuvid3) }
-        if let v = found["buvid4"] { ud.set(v, forKey: keyBuvid4) }
-        if !sessdata.isEmpty {
-            ud.set(Date().timeIntervalSince1970, forKey: keySavedAt)
-            return true
-        }
-        return false
     }
 
     static func signOut() {
@@ -496,17 +494,19 @@ private struct BiliLoginWeb: UIViewRepresentable {
     final class Coord: NSObject, WKNavigationDelegate {
         let parent: BiliLoginWeb
         private var timer: Timer?
+        private var finished = false
         init(_ p: BiliLoginWeb) { parent = p }
 
         func startPolling() {
             timer?.invalidate()
             timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-                Task {
-                    if await BiliAuth.syncFromWebKit() {
-                        self?.timer?.invalidate()
-                        self?.timer = nil
-                        await MainActor.run { self?.parent.onLoggedIn() }
-                    }
+                guard let self, !self.finished else { return }
+                BiliAuth.syncFromWebKit { ok in
+                    guard ok, !self.finished else { return }
+                    self.finished = true
+                    self.timer?.invalidate()
+                    self.timer = nil
+                    self.parent.onLoggedIn()
                 }
             }
         }
