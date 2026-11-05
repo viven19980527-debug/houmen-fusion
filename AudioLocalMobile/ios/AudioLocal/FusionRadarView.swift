@@ -1,5 +1,6 @@
 import SwiftUI
 import SafariServices
+import WebKit
 
 /// Only Bilibili has a new collection adapter. Other buttons open manual search;
 /// they do not inject scripts, transfer login sessions, or promise collection.
@@ -150,4 +151,211 @@ private struct FusionSafariView: UIViewControllerRepresentable {
         return SFSafariViewController(url: url, configuration: configuration)
     }
     func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
+}
+
+
+// MARK: - 统一采集页（B站 + 抖音 + 小红书 同页，同一套登录）
+
+struct UnifiedCaptureView: View {
+    @EnvironmentObject private var store: CommentStore
+    @EnvironmentObject private var fusion: FusionLeadStore
+
+    @StateObject private var bili = FusionBiliClient()
+    @State private var collectors: [AuthPlatform: BrowserCollector] = [:]
+
+    @State private var keyword = ""
+    @State private var limit = 50
+    @State private var picked: Set<AuthPlatform> = [.bilibili]
+    @State private var loginTarget: AuthPlatform?
+    @State private var runningPlatform: AuthPlatform?
+    @State private var logLines: [String] = []
+    @State private var busy = false
+
+    private var term: String { keyword.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("关键词") {
+                    TextField("输入关键词，例如：空调安装多少钱", text: $keyword)
+                        .autocorrectionDisabled()
+                    Picker("每个平台最多", selection: $limit) {
+                        Text("20 条").tag(20)
+                        Text("50 条").tag(50)
+                        Text("100 条").tag(100)
+                    }
+                }
+
+                Section("平台（可多选，一次跑完）") {
+                    ForEach(AuthPlatform.allCases) { p in
+                        Button {
+                            if picked.contains(p) { picked.remove(p) } else { picked.insert(p) }
+                        } label: {
+                            HStack {
+                                Image(systemName: picked.contains(p) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(picked.contains(p) ? Color.accentColor : .secondary)
+                                Text(p.title)
+                                Spacer()
+                                if AuthPlatform.isLoggedIn(p) {
+                                    Text("已登录").font(.caption2).foregroundStyle(.green)
+                                } else {
+                                    Text("未登录").font(.caption2).foregroundStyle(.orange)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                Section("登录（三个平台同一套流程）") {
+                    ForEach(AuthPlatform.allCases) { p in
+                        HStack {
+                            Image(systemName: AuthPlatform.isLoggedIn(p)
+                                  ? "checkmark.seal.fill" : "person.crop.circle.badge.exclamationmark")
+                                .foregroundStyle(AuthPlatform.isLoggedIn(p) ? .green : .orange)
+                            Text(p.title)
+                            Spacer()
+                            Button(AuthPlatform.isLoggedIn(p) ? "重新登录" : "登录") {
+                                loginTarget = p
+                            }
+                            if AuthPlatform.isLoggedIn(p) {
+                                Button("清除") { PlatformAuth.signOut(p); refreshAll() }
+                                    .font(.caption).foregroundStyle(.red)
+                            }
+                        }
+                    }
+                    Text("登录只为通过平台访客校验；cookie 保存在本机，不上传。抖音/小红书登录后，内置浏览器会直接复用同一登录态。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
+                Section("采集") {
+                    Button {
+                        runAll()
+                    } label: {
+                        HStack {
+                            Image(systemName: "bolt.horizontal.circle.fill")
+                            Text(busy ? "采集中…" : "一键采集（\(picked.count) 个平台）")
+                                .font(.headline)
+                            Spacer()
+                            if busy { ProgressView() }
+                        }
+                    }
+                    .disabled(busy || term.isEmpty || picked.isEmpty)
+                    if !bili.progress.isEmpty {
+                        Text(bili.progress).font(.caption2)
+                    }
+                    if !bili.errorText.isEmpty {
+                        Label(bili.errorText, systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }
+
+                if !logLines.isEmpty {
+                    Section("运行日志") {
+                        ForEach(Array(logLines.suffix(12).enumerated()), id: \.offset) { _, line in
+                            Text(line).font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(BackdoorTheme.background)
+            .navigationTitle("统一采集")
+            .sheet(item: $loginTarget) { p in
+                PlatformLoginView(platform: p)
+            }
+            .sheet(item: $runningPlatform) { p in
+                collectorSheet(p)
+            }
+            .onAppear { refreshAll() }
+        }
+    }
+
+    // MARK: 采集器 sheet（抖音 / 小红书）
+
+    // 内置浏览器（复用采集器的 WKWebView）
+    private struct CollectorWebView: UIViewRepresentable {
+        let webView: WKWebView
+        func makeUIView(context: Context) -> WKWebView { webView }
+        func updateUIView(_ uiView: WKWebView, context: Context) {}
+    }
+
+    @ViewBuilder
+    private func collectorSheet(_ p: AuthPlatform) -> some View {
+        let c: BrowserCollector = {
+            if let existing = collectors[p] { return existing }
+            let made = BrowserCollector(store: store)
+            collectors[p] = made
+            return made
+        }()
+        NavigationStack {
+            VStack(spacing: 0) {
+                Text(c.stage).font(.caption).frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8).background(Color.blue.opacity(0.12))
+                CollectorWebView(webView: c.webView)
+            }
+            .navigationTitle("\(p.title) 采集")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("完成") {
+                        c.stop()
+                        runningPlatform = nil
+                        log("\(p.title)：已停止")
+                    }.bold()
+                }
+            }
+            .onAppear {
+                log("\(p.title)：开始采集…")
+                if p == .douyin {
+                    c.start(keyword: term, recency: .all, industry: .general, platform: .douyin)
+                } else {
+                    c.start(keyword: term, recency: .all, industry: .general, platform: .xiaohongshu)
+                }
+            }
+        }
+    }
+
+    // MARK: 运行
+
+    private func runAll() {
+        guard !busy else { return }
+        busy = true
+        log("开始：\(picked.map { $0.title }.joined(separator: "、")) · 关键词「\(term)」")
+        Task {
+            // 1) B站：原生
+            if picked.contains(.bilibili) {
+                if !AuthPlatform.isLoggedIn(.bilibili) {
+                    log("B站：未登录，可能返回 -101")
+                }
+                await bili.search(keyword: term, limit: limit) { rows in
+                    try fusion.add(rows)
+                }
+                log("B站：完成，\(bili.progress)")
+            }
+            // 2) 抖音 / 小红书：内置浏览器
+            for p in [AuthPlatform.douyin, .xhs] where picked.contains(p) {
+                await MainActor.run { runningPlatform = p }
+                log("\(p.title)：已打开内置浏览器，完成后点「完成」")
+                try? await Task.sleep(nanoseconds: 90_000_000_000)
+                await MainActor.run { runningPlatform = nil }
+            }
+            await MainActor.run {
+                busy = false
+                log("全部完成。结果在「线索工作台」")
+                refreshAll()
+            }
+        }
+    }
+
+    private func log(_ s: String) {
+        logLines.append(s)
+    }
+
+    private func refreshAll() {
+        for p in AuthPlatform.allCases where p != .bilibili {
+            PlatformAuth.checkWebKit(p) { _ in }
+        }
+    }
 }

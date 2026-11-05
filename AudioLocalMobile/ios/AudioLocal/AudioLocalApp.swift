@@ -10,8 +10,8 @@ struct AudioLocalApp: App {
             TabView {
                 HomeView().environmentObject(store)
                     .tabItem { Label("精细采集", systemImage: "magnifyingglass") }
-                FusionRadarView().environmentObject(fusion)
-                    .tabItem { Label("获客雷达", systemImage: "dot.radiowaves.left.and.right") }
+                UnifiedCaptureView().environmentObject(store).environmentObject(fusion)
+                    .tabItem { Label("统一采集", systemImage: "dot.radiowaves.left.and.right") }
                 FusionWorkspaceView().environmentObject(store).environmentObject(fusion)
                     .tabItem { Label("线索工作台", systemImage: "tray.full") }
             }

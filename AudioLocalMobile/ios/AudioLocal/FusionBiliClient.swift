@@ -514,3 +514,144 @@ private struct BiliLoginWeb: UIViewRepresentable {
         deinit { timer?.invalidate() }
     }
 }
+
+
+// MARK: - 统一登录（B站 / 抖音 / 小红书 同一套机制）
+
+enum AuthPlatform: String, CaseIterable, Identifiable {
+    case bilibili, douyin, xhs
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .bilibili: return "B站"
+        case .douyin:   return "抖音"
+        case .xhs:      return "小红书"
+        }
+    }
+    var loginURL: String {
+        switch self {
+        case .bilibili: return "https://passport.bilibili.com/login"
+        case .douyin:   return "https://www.douyin.com/hot"
+        case .xhs:      return "https://www.xiaohongshu.com/login"
+        }
+    }
+    /// 判定"已登录"的 cookie 键（任一存在即可）
+    var sessionKeys: [String] {
+        switch self {
+        case .bilibili: return ["SESSDATA"]
+        case .douyin:   return ["sessionid", "sessionid_ss", "sid_tt", "passport_csrf_token"]
+        case .xhs:      return ["web_session", "a1"]
+        }
+    }
+    var cookieDomainHint: String {
+        switch self {
+        case .bilibili: return "bilibili.com"
+        case .douyin:   return "douyin.com"
+        case .xhs:      return "xiaohongshu.com"
+        }
+    }
+}
+
+enum PlatformAuth {
+
+    private static func flagKey(_ p: AuthPlatform) -> String { "auth.logged.\(p.rawValue)" }
+
+    static func isLoggedIn(_ p: AuthPlatform) -> Bool {
+        if p == .bilibili { return BiliAuth.isLoggedIn }
+        return UserDefaults.standard.bool(forKey: flagKey(p))
+    }
+
+    static func checkWebKit(_ p: AuthPlatform, _ done: @escaping (Bool) -> Void) {
+        WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
+            var names = Set<String>()
+            for c in cookies where c.domain.contains(p.cookieDomainHint) {
+                names.insert(c.name)
+            }
+            let ok = p.sessionKeys.contains { names.contains($0) }
+            if ok { UserDefaults.standard.set(true, forKey: flagKey(p)) }
+            DispatchQueue.main.async { done(ok) }
+        }
+    }
+
+    static func signOut(_ p: AuthPlatform) {
+        UserDefaults.standard.set(false, forKey: flagKey(p))
+        if p == .bilibili { BiliAuth.signOut() }
+    }
+}
+
+// MARK: - 统一登录页（三个平台共用）
+
+struct PlatformLoginView: View {
+    let platform: AuthPlatform
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var done = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Text(done ? "已识别 \(platform.title) 登录态，点「完成」返回"
+                          : "在下方登录 \(platform.title)（扫码或账号密码），成功后自动识别")
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(done ? Color.green.opacity(0.15) : Color.blue.opacity(0.12))
+                PlatformLoginWeb(platform: platform, onLoggedIn: { done = true })
+            }
+            .navigationTitle("\(platform.title) 登录")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("完成") { dismiss() }.bold()
+                }
+            }
+        }
+    }
+}
+
+private struct PlatformLoginWeb: UIViewRepresentable {
+    let platform: AuthPlatform
+    let onLoggedIn: () -> Void
+
+    func makeCoordinator() -> Coord { Coord(self) }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        cfg.websiteDataStore = .default()          // 与采集 WebView 共用同一 cookie 仓库
+        let wv = WKWebView(frame: .zero, configuration: cfg)
+        wv.navigationDelegate = context.coordinator
+        if let u = URL(string: platform.loginURL) { wv.load(URLRequest(url: u)) }
+        context.coordinator.start()
+        return wv
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    final class Coord: NSObject, WKNavigationDelegate {
+        let parent: PlatformLoginWeb
+        private var timer: Timer?
+        private var finished = false
+
+        init(_ p: PlatformLoginWeb) { parent = p }
+
+        func start() {
+            timer?.invalidate()
+            timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+                guard let self, !self.finished else { return }
+                PlatformAuth.checkWebKit(self.parent.platform) { ok in
+                    guard ok, !self.finished else { return }
+                    // B站 额外把 cookie 落进 UserDefaults 供原生请求使用
+                    if self.parent.platform == .bilibili {
+                        BiliAuth.syncFromWebKit { _ in }
+                    }
+                    self.finished = true
+                    self.timer?.invalidate()
+                    self.timer = nil
+                    self.parent.onLoggedIn()
+                }
+            }
+        }
+
+        deinit { timer?.invalidate() }
+    }
+}
