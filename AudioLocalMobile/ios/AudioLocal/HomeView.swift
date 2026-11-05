@@ -812,59 +812,91 @@ private struct LocalSettingsSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                if let error { Section { Text(error).foregroundStyle(BackdoorTheme.warning) }.listRowBackground(NightFormRow()) }
-                Section("地区与年龄") {
-                    TextField("地区，不限请留空", text: $draft.region)
-                    Text("可匹配已保存的主页公开地区或评论 IP 属地；IP 属地不是居住地，结果详情会标明来源。")
-                        .font(.caption).foregroundStyle(BackdoorTheme.secondary)
-                    HStack {
-                        TextField("最小年龄", text: $minimumText).keyboardType(.numberPad)
-                        Text("—").foregroundStyle(BackdoorTheme.secondary)
-                        TextField("最大年龄", text: $maximumText).keyboardType(.numberPad)
-                    }
-                    Toggle("包含年龄未知", isOn: $draft.includeUnknownAge)
-                    Text("年龄仅来自人工核实的主页公开资料。空值表示不限，范围为 1–120；不会根据头像、昵称或评论猜测。")
-                        .font(.caption).foregroundStyle(BackdoorTheme.secondary)
-                }.listRowBackground(NightFormRow())
-                Section("本机筛选") {
-                    TextField("额外搜索昵称、评论、备注", text: $draft.query)
-                    Toggle("只看收藏", isOn: $draft.savedOnly)
-                    Toggle("只看意向线索（待核实）", isOn: $draft.cluesOnly)
-                    Toggle("按公开主页合并", isOn: $draft.grouped)
-                    Toggle("全部任务，仍限90天来源", isOn: $history)
-                    Button("恢复默认筛选") {
-                        draft = LocalFilters(); minimumText = ""; maximumText = ""; error = nil
-                    }
-                }.listRowBackground(NightFormRow())
-                Section("当前范围") {
-                    Text(taskKeyword.isEmpty ? "尚未提交采集任务" : "已提交：" + taskPlatform.title + " · " + taskIndustry.title + " · " + taskKeyword)
-                    Text("90天合格来源共 \(totalCount) 条评论。行业只作引导，关键词可自由输入；提交前修改草稿不改变结果，评论不必包含采集词。")
-                    Text("来源先找近7天，合格来源不足5个时用8–30天补充，再用31–90天兜底；各档最新优先，任务最多5个来源，非全量。再筛选评论时间、意向、地区和年龄；时间未知、未来、仅有编辑时间或超90天的来源不计入。评论时间默认全部，也可手动缩小。")
-                }.font(.footnote).listRowBackground(NightFormRow())
-                Section("使用说明") {
-                    DisclosureGroup("平台与采集范围") {
-                        Text("抖音试用适配；小红书尚未接通验收，仅供测试。来源须确认最新排序与90天内原发布时间；不能确认则暂停或跳过，不使用未知日期或超90天来源补足。每任务最多 5 个来源页，每页最多检查 200 条、保存 50 条评论，非全量；请保持前台。")
-                        Text("抖音、小红书需要时请在 App 内网页本人登录、处理验证码。微信、小红书等原 App 的登录状态不会共享到本页。不会绕过登录或访问限制。")
-                        Text("视频号未接通关键词查找与评论采集，能打开视频号助手不等于接通；淘宝、京东也未适配。")
-                        Text("新任务重新搜索来源。旧版断点没有最新排序和来源日期证明，不会沿用旧队列；已存记录不删除。所有任务视图仍先限制90天来源，旧数据仅可从“历史备份”导出。")
-                    }
-                    DisclosureGroup("公开资料与隐私") {
-                        Text("这些高级筛选只作用于本机资料，不会自动补全未知年龄或地区。意向标签待人工核实，不保证成交；关闭“只看意向线索”可查看普通评论。不推断身份、财富或手机号，不自动发送消息。")
-                        Text("本机保存，无管理服务器，不读取其他 App 登录态、SIM、短信、通讯录。没有设备/电话卡锁，不保证防转发。")
-                    }
-                    DisclosureGroup("本机数据与版本") {
-                        Text("记录上限 2000 条。导出、清理、平台登录在右上菜单；清理需确认，卸载可能丢失数据。评论与断点是独立原子文件，断点计数写失败可能低报新增，但已提交评论保留。")
-                        Text("0.1.7 (9) · 本机协议响应优先，仍需 iPhone 真机采集验收。")
-                    }
-                }.font(.footnote).listRowBackground(NightFormRow())
+                errorRow
+                regionSection
+                localSection
+                scopeSection
+                helpSection
             }
-            .scrollContentBackground(.hidden).scrollDismissesKeyboard(.interactively).nightScreen()
-            .navigationTitle("筛选").navigationBarTitleDisplayMode(.inline)
+            .scrollContentBackground(.hidden)
+            .scrollDismissesKeyboard(.interactively)
+            .nightScreen()
+            .navigationTitle("筛选")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) { Button("应用") { applyFilters() } }
-            }.tint(BackdoorTheme.accent)
+            }
+            .tint(BackdoorTheme.accent)
         }
+    }
+
+    @ViewBuilder private var errorRow: some View {
+        if let error {
+            Section { Text(error).foregroundStyle(BackdoorTheme.warning) }
+                .listRowBackground(NightFormRow())
+        }
+    }
+
+    @ViewBuilder private var regionSection: some View {
+        Section("地区与年龄") {
+            TextField("地区，不限请留空", text: $draft.region)
+            Text("可匹配已保存的主页公开地区或评论 IP 属地；IP 属地不是居住地，结果详情会标明来源。")
+                .font(.caption).foregroundStyle(BackdoorTheme.secondary)
+            HStack {
+                TextField("最小年龄", text: $minimumText).keyboardType(.numberPad)
+                Text("—").foregroundStyle(BackdoorTheme.secondary)
+                TextField("最大年龄", text: $maximumText).keyboardType(.numberPad)
+            }
+            Toggle("包含年龄未知", isOn: $draft.includeUnknownAge)
+            Text("年龄仅来自人工核实的主页公开资料。空值表示不限，范围为 1–120；不会根据头像、昵称或评论猜测。")
+                .font(.caption).foregroundStyle(BackdoorTheme.secondary)
+        }.listRowBackground(NightFormRow())
+    }
+
+    @ViewBuilder private var localSection: some View {
+        Section("本机筛选") {
+            TextField("额外搜索昵称、评论、备注", text: $draft.query)
+            Toggle("只看收藏", isOn: $draft.savedOnly)
+            Toggle("只看意向线索（待核实）", isOn: $draft.cluesOnly)
+            Toggle("按公开主页合并", isOn: $draft.grouped)
+            Toggle("全部任务，仍限90天来源", isOn: $history)
+            Button("恢复默认筛选") {
+                draft = LocalFilters(); minimumText = ""; maximumText = ""; error = nil
+            }
+        }.listRowBackground(NightFormRow())
+    }
+
+    @ViewBuilder private var scopeSection: some View {
+        Section("当前范围") {
+            Text(scopeLine1)
+            Text("90天合格来源共 \(totalCount) 条评论。行业只作引导，关键词可自由输入；提交前修改草稿不改变结果，评论不必包含采集词。")
+            Text("来源先找近7天，合格来源不足5个时用8–30天补充，再用31–90天兜底；各档最新优先，任务最多5个来源，非全量。再筛选评论时间、意向、地区和年龄；时间未知、未来、仅有编辑时间或超90天的来源不计入。评论时间默认全部，也可手动缩小。")
+        }.font(.footnote).listRowBackground(NightFormRow())
+    }
+
+    private var scopeLine1: String {
+        if taskKeyword.isEmpty { return "尚未提交采集任务" }
+        return "已提交：" + taskPlatform.title + " · " + taskIndustry.title + " · " + taskKeyword
+    }
+
+    @ViewBuilder private var helpSection: some View {
+        Section("使用说明") {
+            DisclosureGroup("平台与采集范围") {
+                Text("抖音试用适配；小红书尚未接通验收，仅供测试。来源须确认最新排序与90天内原发布时间；不能确认则暂停或跳过，不使用未知日期或超90天来源补足。每任务最多 5 个来源页，每页最多检查 200 条、保存 50 条评论，非全量；请保持前台。")
+                Text("抖音、小红书需要时请在 App 内网页本人登录、处理验证码。微信、小红书等原 App 的登录状态不会共享到本页。不会绕过登录或访问限制。")
+                Text("视频号未接通关键词查找与评论采集，能打开视频号助手不等于接通；淘宝、京东也未适配。")
+                Text("新任务重新搜索来源。旧版断点没有最新排序和来源日期证明，不会沿用旧队列；已存记录不删除。所有任务视图仍先限制90天来源，旧数据仅可从“历史备份”导出。")
+            }
+            DisclosureGroup("公开资料与隐私") {
+                Text("这些高级筛选只作用于本机资料，不会自动补全未知年龄或地区。意向标签待人工核实，不保证成交；关闭“只看意向线索”可查看普通评论。不推断身份、财富或手机号，不自动发送消息。")
+                Text("本机保存，无管理服务器，不读取其他 App 登录态、SIM、短信、通讯录。没有设备/电话卡锁，不保证转发。")
+            }
+            DisclosureGroup("本机数据与版本") {
+                Text("记录上限 2000 条。导出、清理、平台登录在右上菜单；清理需确认，卸载可能丢失数据。评论与断点是独立原子文件，断点计数写失败可能低报新增，但已提交评论保留。")
+                Text("0.1.7 (9) · 本机协议响应优先，仍需 iPhone 真机采集验收。")
+            }
+        }.font(.footnote).listRowBackground(NightFormRow())
     }
     private func applyFilters() {
         do {
