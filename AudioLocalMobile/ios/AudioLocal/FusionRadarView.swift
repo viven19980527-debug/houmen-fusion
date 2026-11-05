@@ -86,7 +86,7 @@ struct FusionRadarView: View {
             .sheet(isPresented: $showBiliLogin) {
                 BiliLoginView()
             }
-            .onChange(of: showBiliLogin) { _, presenting in
+            .onChange(of: showBiliLogin) { presenting in
                 if !presenting { loggedIn = BiliAuth.isLoggedIn }
             }
             .onDisappear(perform: stop)
