@@ -335,7 +335,7 @@ struct UnifiedCaptureView: View {
                 log("B站：完成，\(bili.progress)")
             }
             // 2) 抖音 / 小红书：内置浏览器
-            for p in [AuthPlatform.douyin, .xhs] where picked.contains(p) {
+            for p: AuthPlatform in [.douyin, .xhs] where picked.contains(p) {
                 await MainActor.run { runningPlatform = p }
                 log("\(p.title)：已打开内置浏览器，完成后点「完成」")
                 try? await Task.sleep(nanoseconds: 90_000_000_000)
