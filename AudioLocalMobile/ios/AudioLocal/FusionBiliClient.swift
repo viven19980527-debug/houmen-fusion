@@ -240,6 +240,53 @@ final class FusionBiliClient: ObservableObject {
         running = false
     }
 
+    /// 浏览器 UA（B站对自定义 UA 直接 -101）
+    private static let browserUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
+        + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+
+    /// 匿名访客 cookie（buvid3/buvid4），仅存内存
+    private var guestCookie = ""
+
+    private func bootstrapGuestCookie(_ session: URLSession) async {
+        guard guestCookie.isEmpty else { return }
+        if let url = URL(string: "https://api.bilibili.com/x/frontend/finger/spi") {
+            var req = URLRequest(url: url)
+            req.setValue(Self.browserUA, forHTTPHeaderField: "User-Agent")
+            req.setValue("https://www.bilibili.com/", forHTTPHeaderField: "Referer")
+            if let (data, _) = try? await session.data(for: req),
+               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let d = root["data"] as? [String: Any] {
+                let b3 = (d["b_3"] as? String) ?? ""
+                let b4 = (d["b_4"] as? String) ?? ""
+                var parts: [String] = []
+                if !b3.isEmpty { parts.append("buvid3=" + b3) }
+                if !b4.isEmpty { parts.append("buvid4=" + b4) }
+                guestCookie = parts.joined(separator: "; ")
+            }
+        }
+        // 兜底：直接访问首页抓 Set-Cookie
+        if guestCookie.isEmpty, let home = URL(string: "https://www.bilibili.com/") {
+            var req = URLRequest(url: home)
+            req.setValue(Self.browserUA, forHTTPHeaderField: "User-Agent")
+            if let (_, resp) = try? await session.data(for: req),
+               let http = resp as? HTTPURLResponse {
+                let fields = http.allHeaderFields
+                var parts: [String] = []
+                for (k, v) in fields {
+                    let key = String(describing: k)
+                    if key.lowercased() == "set-cookie" {
+                        let line = String(describing: v)
+                        let first = line.components(separatedBy: ";").first ?? line
+                        if first.hasPrefix("buvid3=") || first.hasPrefix("buvid4=") {
+                            parts.append(first)
+                        }
+                    }
+                }
+                guestCookie = parts.joined(separator: "; ")
+            }
+        }
+    }
+
     private func perform(keyword: String, limit: Int, onBatch: ([FusionLead]) throws -> Int) async {
         let config = URLSessionConfiguration.ephemeral
         config.httpCookieStorage = nil
@@ -263,9 +310,16 @@ final class FusionBiliClient: ObservableObject {
                 requestCount += 1
                 var request = URLRequest(url: url)
                 request.httpMethod = "GET"
+                // 匿名访客 cookie 由本机首次请求获取，仅用于通过 B站访客风控（-101）
                 request.httpShouldHandleCookies = false
-                request.setValue("application/json", forHTTPHeaderField: "Accept")
-                request.setValue("HoumenFusion/0.2 PublicContentReader", forHTTPHeaderField: "User-Agent")
+                request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
+                request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
+                request.setValue(Self.browserUA, forHTTPHeaderField: "User-Agent")
+                request.setValue("https://www.bilibili.com/", forHTTPHeaderField: "Referer")
+                request.setValue("https://www.bilibili.com", forHTTPHeaderField: "Origin")
+                if !guestCookie.isEmpty {
+                    request.setValue(guestCookie, forHTTPHeaderField: "Cookie")
+                }
                 let (bytes, response) = try await session.bytes(for: request)
                 guard let http = response as? HTTPURLResponse, let finalURL = http.url,
                       FusionBiliParsing.allows(finalURL) else { throw FusionBiliError.invalidResponse }
@@ -283,6 +337,8 @@ final class FusionBiliClient: ObservableObject {
                 }
                 return try FusionBiliParsing.envelope(data)
             }
+            // 先取匿名访客标识（buvid3/buvid4）；不带 cookie 时 B站 会返回 -101
+            await bootstrapGuestCookie(session)
             guard let nav = URL(string: "https://api.bilibili.com/x/web-interface/nav") else {
                 throw FusionBiliError.invalidURL
             }
