@@ -762,3 +762,512 @@ private struct PlatformLoginWeb: UIViewRepresentable {
         deinit { timer?.invalidate() }
     }
 }
+
+
+// MARK: - 黑科技模块 1：签名函数探针（找平台的 x-s / a_bogus 生成器）
+
+struct SignerProbeView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var urlText = "https://www.xiaohongshu.com/explore"
+    @State private var results: [ProbeHit] = []
+    @State private var running = false
+    @State private var reloadKey = UUID()
+
+    struct ProbeHit: Identifiable {
+        let id = UUID()
+        let path: String
+        let sample: String
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("目标页面") {
+                    TextField("https://…", text: $urlText)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    Button {
+                        results = []
+                        running = true
+                        reloadKey = UUID()
+                    } label: {
+                        Label(running ? "扫描中…" : "开始扫描", systemImage: "waveform.badge.magnifyingglass")
+                    }
+                }
+                Section("探针（做什么）") {
+                    Text("在页面里遍历所有全局对象，对每个函数用假参数试调一次；返回 32–128 位十六进制串的，就是签名算法候选（x-s / a_bogus / sig3 这类）。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Text("找到后用它的路径就能在原生侧复现签名，彻底摆脱 WebView 渲染。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Section("候选（\(results.count)）") {
+                    if results.isEmpty {
+                        Text("还没有结果").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    ForEach(results) { hit in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(hit.path).font(.caption.monospaced())
+                            Text(hit.sample.prefix(64)).font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                        .textSelection(.enabled)
+                    }
+                }
+            }
+            .navigationTitle("签名探针")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) { Button("完成") { dismiss() } }
+            }
+            .safeAreaInset(edge: .bottom) {
+                ProbeWeb(urlString: urlText, run: $running) { hits in
+                    results = hits.map { ProbeHit(path: $0.0, sample: $0.1) }
+                    running = false
+                }
+                .frame(height: 1)
+            }
+            .id(reloadKey)
+        }
+    }
+}
+
+private struct ProbeWeb: UIViewRepresentable {
+    let urlString: String
+    @Binding var run: Bool
+    let onResult: ([(String, String)]) -> Void
+
+    func makeCoordinator() -> Coord { Coord(self) }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        cfg.websiteDataStore = .default()
+        cfg.defaultWebpagePreferences.preferredContentMode = .desktop
+        let wv = WKWebView(frame: .zero, configuration: cfg)
+        wv.navigationDelegate = context.coordinator
+        if let u = URL(string: urlString) { wv.load(URLRequest(url: u)) }
+        return wv
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        if run, !context.coordinator.scanned {
+            context.coordinator.scanned = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                context.coordinator.scan(uiView)
+            }
+        }
+    }
+
+    final class Coord: NSObject, WKNavigationDelegate {
+        let parent: ProbeWeb
+        var scanned = false
+        init(_ p: ProbeWeb) { parent = p }
+
+        func scan(_ wv: WKWebView) {
+            let js = """
+            (function(){
+              var out=[], seen=new Set();
+              var isHex=function(s){ return typeof s==='string' && /^[0-9a-fA-F]{16,128}$/.test(s); };
+              function scanObj(obj, path, depth){
+                if(!obj||depth>2||out.length>60) return;
+                var keys;
+                try { keys = Object.getOwnPropertyNames(obj); } catch(e){ return; }
+                for(var i=0;i<keys.length && out.length<=60;i++){
+                  var k=keys[i];
+                  var v; try { v=obj[k]; } catch(e){ continue; }
+                  if(typeof v==='function'){
+                    var r;
+                    try { r = v('a=1&b=2'); } catch(e){ r=undefined; }
+                    if(isHex(r)) out.push([path+'.'+k, String(r)]);
+                    else {
+                      try { r = v({url:'/x',data:'1'}); } catch(e){ r=undefined; }
+                      if(isHex(r)) out.push([path+'.'+k, String(r)]);
+                    }
+                  } else if(v && typeof v==='object' && depth<2){
+                    scanObj(v, path+'.'+k, depth+1);
+                  }
+                }
+              }
+              scanObj(window, 'window', 0);
+              return JSON.stringify(out);
+            })();
+            """
+            wv.evaluateJavaScript(js) { result, _ in
+                guard let s = result as? String,
+                      let d = s.data(using: .utf8),
+                      let arr = try? JSONSerialization.jsonObject(with: d) as? [[String]] else {
+                    self.parent.onResult([]); return
+                }
+                self.parent.onResult(arr.compactMap { $0.count >= 2 ? ($0[0], $0[1]) : nil })
+            }
+        }
+    }
+}
+
+// MARK: - 黑科技模块 2：Protobuf 解包器（未知 schema 也能看结构）
+
+enum PBDecoder {
+
+    /// 解析 protobuf wire format，返回字段树文本
+    static func dump(_ data: Data) -> String {
+        var lines: [String] = []
+        walk(data, indent: 0, path: "$", into: &lines, depth: 0)
+        return lines.isEmpty ? "（不是有效的 protobuf，或长度为 0）" : lines.joined(separator: "\n")
+    }
+
+    private static func readVarint(_ d: Data, _ i: inout Int) -> UInt64? {
+        var shift = 0
+        var value: UInt64 = 0
+        while i < d.count {
+            let b = d[i]; i += 1
+            value |= UInt64(b & 0x7F) << UInt64(shift)
+            if b & 0x80 == 0 { return value }
+            shift += 7
+            if shift > 63 { return nil }
+        }
+        return nil
+    }
+
+    private static func walk(_ d: Data, indent: Int, path: String, into out: inout [String], depth: Int) {
+        if depth > 6 || out.count > 400 || d.isEmpty { return }
+        var i = 0
+        let pad = String(repeating: "  ", count: indent)
+        while i < d.count {
+            guard let key = readVarint(d, &i) else { return }
+            let field = Int(key >> 3)
+            let wt = Int(key & 0x7)
+            switch wt {
+            case 0:
+                guard let v = readVarint(d, &i) else { return }
+                out.append("\(pad)\(field): varint \(v)")
+            case 1:
+                guard i + 8 <= d.count else { return }
+                i += 8
+                out.append("\(pad)\(field): fixed64")
+            case 2:
+                guard let len = readVarint(d, &i), i + Int(len) <= d.count else { return }
+                let sub = d.subdata(in: i..<(i + Int(len)))
+                i += Int(len)
+                // 猜是不是嵌套消息：能完整解析就当消息
+                var inner: [String] = []
+                walk(sub, indent: indent + 1, path: path + ".\(field)", into: &inner, depth: depth + 1)
+                if !inner.isEmpty {
+                    out.append("\(pad)\(field): message (\(len) B)")
+                    out.append(contentsOf: inner)
+                } else if let s = String(data: sub, encoding: .utf8),
+                          s.rangeOfCharacter(from: .controlCharacters) == nil {
+                    out.append("\(pad)\(field): \"\(s.prefix(120))\"")
+                } else {
+                    out.append("\(pad)\(field): bytes(\(len)) \(sub.prefix(16).map { String(format: "%02x", $0) }.joined())")
+                }
+            case 5:
+                guard i + 4 <= d.count else { return }
+                i += 4
+                out.append("\(pad)\(field): fixed32")
+            default:
+                return
+            }
+        }
+    }
+}
+
+struct PBToolView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var input = ""
+    @State private var output = ""
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("输入（base64 / hex）") {
+                    TextEditor(text: $input)
+                        .frame(minHeight: 120).font(.caption.monospaced())
+                    Button {
+                        run()
+                    } label: { Label("解包", systemImage: "shippingbox.and.arrow.backward") }
+                }
+                Section("结果") {
+                    Text(output.isEmpty ? "（等待解包）" : output)
+                        .font(.caption2.monospaced())
+                        .textSelection(.enabled)
+                }
+                Section {
+                    Text("抖音/快手部分接口返回 protobuf，JSON 会丢字段。这里按 wire format 直接拆：字段号、类型、嵌套消息、可见字符串。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Protobuf 解包")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) { Button("完成") { dismiss() } }
+            }
+        }
+    }
+
+    private func run() {
+        let t = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        var data: Data?
+        if let d = Data(base64Encoded: t) { data = d }
+        else {
+            var bytes = [UInt8]()
+            var s = t.replacingOccurrences(of: " ", with: "")
+            s = s.replacingOccurrences(of: "0x", with: "")
+            var idx = s.startIndex
+            while idx < s.endIndex {
+                let next = s.index(idx, offsetBy: 2, limitedBy: s.endIndex) ?? s.endIndex
+                if let b = UInt8(s[idx..<next], radix: 16) { bytes.append(b) }
+                idx = next
+            }
+            if !bytes.isEmpty { data = Data(bytes) }
+        }
+        guard let payload = data else { output = "无法识别：既不是 base64 也不是 hex"; return }
+        output = PBDecoder.dump(payload)
+    }
+}
+
+// MARK: - 黑科技模块 3：跨平台同一人识别
+
+enum IdentityMatcher {
+
+    /// 64 位感知哈希（DCT 版），失败返回 0
+    static func pHash(_ image: UIImage) -> UInt64 {
+        guard let cg = image.cgImage else { return 0 }
+        let w = 32, h = 32
+        var pixels = [UInt8](repeating: 0, count: w * h)
+        guard let ctx = CGContext(data: &pixels, width: w, height: h,
+                                  bitsPerComponent: 8, bytesPerRow: w,
+                                  space: CGColorSpaceCreateDeviceGray(),
+                                  bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return 0 }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        // 简化 DCT：对 8x8 低频块做均值比较
+        var low = [Double](repeating: 0, count: 64)
+        for u in 0..<8 {
+            for v in 0..<8 {
+                var sum = 0.0
+                for x in 0..<w {
+                    for y in 0..<h {
+                        let cu = cos((2.0 * Double(x) + 1) * Double(u) * Double.pi / 64.0)
+                        let cv = cos((2.0 * Double(y) + 1) * Double(v) * Double.pi / 64.0)
+                        sum += Double(pixels[y * w + x]) * cu * cv
+                    }
+                }
+                low[u * 8 + v] = sum
+            }
+        }
+        let vals = Array(low.dropFirst())          // 去掉 DC
+        let mean = vals.reduce(0, +) / Double(vals.count)
+        var hash: UInt64 = 0
+        for (i, v) in vals.prefix(63).enumerated() where v > mean {
+            hash |= (1 << UInt64(i))
+        }
+        return hash
+    }
+
+    static func hamming(_ a: UInt64, _ b: UInt64) -> Int {
+        var x = a ^ b
+        var c = 0
+        while x != 0 { c += Int(x & 1); x >>= 1 }
+        return c
+    }
+
+    /// Jaro-Winkler
+    static func jaroWinkler(_ s1: String, _ s2: String) -> Double {
+        let a = Array(s1), b = Array(s2)
+        if a.isEmpty || b.isEmpty { return 0 }
+        let matchDist = max(a.count, b.count) / 2 - 1
+        var aMatch = [Bool](repeating: false, count: a.count)
+        var bMatch = [Bool](repeating: false, count: b.count)
+        var matches = 0
+        for i in 0..<a.count {
+            let lo = max(0, i - matchDist), hi = min(i + matchDist + 1, b.count)
+            if lo >= hi { continue }
+            for j in lo..<hi where !bMatch[j] && a[i] == b[j] {
+                aMatch[i] = true; bMatch[j] = true; matches += 1; break
+            }
+        }
+        if matches == 0 { return 0 }
+        var t = 0.0, k = 0
+        for i in 0..<a.count where aMatch[i] {
+            while !bMatch[k] { k += 1 }
+            if a[i] != b[k] { t += 0.5 }
+            k += 1
+        }
+        let m = Double(matches)
+        var jaro = (m / Double(a.count) + m / Double(b.count) + (m - t) / m) / 3.0
+        var prefix = 0
+        for i in 0..<min(4, min(a.count, b.count)) where a[i] == b[i] { prefix += 1 }
+        jaro += Double(prefix) * 0.1 * (1 - jaro)
+        return jaro
+    }
+
+    static func jaccard(_ s1: String, _ s2: String) -> Double {
+        let x = Set(s1), y = Set(s2)
+        if x.isEmpty || y.isEmpty { return 0 }
+        return Double(x.intersection(y).count) / Double(x.union(y).count)
+    }
+
+    struct Pair: Identifiable {
+        let id = UUID()
+        let a: FusionLead
+        let b: FusionLead
+        let score: Double
+        let reason: String
+    }
+
+    static func candidates(_ leads: [FusionLead]) -> [Pair] {
+        var out: [Pair] = []
+        let list = Array(leads.prefix(300))
+        for i in 0..<list.count {
+            for j in (i + 1)..<list.count {
+                let a = list[i], b = list[j]
+                guard a.platform != b.platform || a.authorName != b.authorName else { continue }
+                let nick = jaroWinkler(a.authorName, b.authorName)
+                guard nick >= 0.8 else { continue }
+                let bio = jaccard(a.keyword, b.keyword)
+                let score = nick * 0.7 + bio * 0.3
+                if score >= 0.75 {
+                    out.append(Pair(a: a, b: b, score: score,
+                                    reason: String(format: "昵称 %.2f · 词 %.2f", nick, bio)))
+                }
+            }
+        }
+        return out.sorted { $0.score > $1.score }.prefix(50).map { $0 }
+    }
+}
+
+struct IdentityView: View {
+    let leads: [FusionLead]
+    @Environment(\.dismiss) private var dismiss
+    @State private var pairs: [IdentityMatcher.Pair] = []
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("做什么") {
+                    Text("同一人多平台出现时，昵称相似 + 简介词重合会合并展示。头像 pHash 需要联网取图，这里先用昵称/词向量。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Section("疑似同一人（\(pairs.count)）") {
+                    if pairs.isEmpty {
+                        Text("没有发现重复").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    ForEach(pairs) { p in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(String(format: "%.2f  %@ · %@", p.score, p.a.platformTitle, p.a.authorName))
+                                .font(.caption).bold()
+                            Text("↔ \(p.b.platformTitle) · \(p.b.authorName)")
+                                .font(.caption)
+                            Text(p.reason).font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("跨平台同一人")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) { Button("完成") { dismiss() } }
+            }
+            .onAppear { pairs = IdentityMatcher.candidates(leads) }
+        }
+    }
+}
+
+// MARK: - 黑科技模块 4：三维评分模型
+
+enum Score3 {
+
+    struct Result {
+        let semantic: Double     // 语义意向 0–50
+        let reachable: Double    // 可触达 0–30
+        let active: Double       // 活跃度 0–20
+        var total: Int { Int((semantic + reachable + active).rounded()) }
+        var label: String {
+            total >= 80 ? "高" : total >= 50 ? "中" : "低"
+        }
+    }
+
+    static func score(_ lead: FusionLead, commentCount: Int) -> Result {
+        // 1) 语义分：复用 LeadAssessment 的命中信号
+        let a = lead.assessment
+        var semantic = 0.0
+        let kinds = Set(a.signals.map { $0.kind })
+        if kinds.contains(where: { $0.rawValue == "询价" }) { semantic += 22 }
+        if kinds.contains(where: { $0.rawValue == "采购" }) { semantic += 16 }
+        if kinds.contains(where: { $0.rawValue == "预约服务" }) { semantic += 14 }
+        if kinds.contains(where: { $0.rawValue == "租赁" }) { semantic += 8 }
+        if kinds.contains(where: { $0.rawValue == "咨询" }) { semantic += 8 }
+        semantic += min(10, Double(a.signals.count) * 2.5)
+        if lead.text.contains("?") || lead.text.contains("？") { semantic += 4 }
+        semantic = min(50, semantic)
+
+        // 2) 可触达分：有联系方式 / 有主页
+        var reach = 0.0
+        if !lead.profileURL.isEmpty { reach += 12 }
+        let digits = lead.text.filter { $0.isNumber }
+        if digits.count >= 11 { reach += 18 }        // 评论里带手机号
+        if lead.text.contains("微信") || lead.text.contains("加v") { reach += 10 }
+        reach = min(30, reach)
+
+        // 3) 活跃分：评论条数 + 时间新鲜度
+        var active = min(12.0, Double(commentCount) * 3.0)
+        if let iso = lead.publishedAt {
+            let f = ISO8601DateFormatter()
+            if let d = f.date(from: iso) {
+                let hours = Date().timeIntervalSince(d) / 3600
+                if hours <= 2 { active += 8 }
+                else if hours <= 24 { active += 6 }
+                else if hours <= 72 { active += 4 }
+                else { active += 1 }
+            }
+        }
+        active = min(20, active)
+
+        return Result(semantic: semantic, reachable: reach, active: active)
+    }
+}
+
+struct Score3View: View {
+    let leads: [FusionLead]
+    @Environment(\.dismiss) private var dismiss
+    @State private var rows: [(FusionLead, Score3.Result)] = []
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("模型") {
+                    Text("总分 = 语义意向(50) + 可触达(30) + 活跃度(20)。语义看意图强度与提问句；可触达看主页/手机号/微信；活跃看评论数与发布时间。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Section("排序（\(rows.count)）") {
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, item in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text("\(item.1.total)").bold()
+                                    .foregroundStyle(item.1.total >= 80 ? .red :
+                                                     item.1.total >= 50 ? .orange : .secondary)
+                                Text(item.0.authorName).font(.subheadline)
+                                Spacer()
+                                Text(item.1.label).font(.caption2)
+                            }
+                            Text(String(format: "语义 %.0f / 触达 %.0f / 活跃 %.0f",
+                                        item.1.semantic, item.1.reachable, item.1.active))
+                                .font(.caption2).foregroundStyle(.secondary)
+                            Text(item.0.text.prefix(60)).font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("三维评分")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) { Button("完成") { dismiss() } }
+            }
+            .onAppear {
+                rows = leads.map { ($0, Score3.score($0, commentCount: 1)) }
+                    .sorted { $0.1.total > $1.1.total }
+                    .prefix(100).map { $0 }
+            }
+        }
+    }
+}

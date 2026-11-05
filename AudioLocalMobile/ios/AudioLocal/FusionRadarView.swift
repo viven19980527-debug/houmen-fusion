@@ -171,6 +171,10 @@ struct UnifiedCaptureView: View {
     @State private var logLines: [String] = []
     @State private var busy = false
     @State private var showAdvanced = false
+    @State private var showSigner = false
+    @State private var showPB = false
+    @State private var showIdentity = false
+    @State private var showScore3 = false
     @AppStorage("cap.maxAgeHours") private var maxAgeHours = 0        // 0=不限
     @AppStorage("cap.monitorMids") private var monitorRaw = ""        // 逗号分隔 UID
     @State private var newMid = ""
@@ -306,12 +310,21 @@ struct UnifiedCaptureView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
+                        Button("签名探针（找 x-s/a_bogus）") { showSigner = true }
+                        Button("Protobuf 解包") { showPB = true }
+                        Button("跨平台同一人") { showIdentity = true }
+                        Button("三维评分") { showScore3 = true }
+                        Divider()
                         Button("精细采集（高级流程）") { showAdvanced = true }
                         Button("打开 B站搜索页") { openSearch(.bilibili) }
                         Button("打开抖音搜索页") { openSearch(.douyin) }
                     } label: { Image(systemName: "ellipsis.circle") }
                 }
             }
+            .sheet(isPresented: $showSigner) { SignerProbeView() }
+            .sheet(isPresented: $showPB) { PBToolView() }
+            .sheet(isPresented: $showIdentity) { IdentityView(leads: fusion.records) }
+            .sheet(isPresented: $showScore3) { Score3View(leads: fusion.records) }
             .sheet(isPresented: $showAdvanced) {
                 NavigationStack { HomeView() }
                     .environmentObject(store)
