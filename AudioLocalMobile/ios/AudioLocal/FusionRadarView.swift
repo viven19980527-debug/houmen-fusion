@@ -277,7 +277,7 @@ struct UnifiedCaptureView: View {
                     .environmentObject(store)
                     .environmentObject(fusion)
             }
-            .sheet(item: $loginTarget) { p in
+            .sheet(item: $loginTarget, onDismiss: { refreshAll() }) { p in
                 PlatformLoginView(platform: p)
             }
             .sheet(item: $runningPlatform) { p in

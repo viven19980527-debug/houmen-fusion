@@ -621,7 +621,37 @@ private struct PlatformLoginWeb: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
         cfg.websiteDataStore = .default()          // 与采集 WebView 共用同一 cookie 仓库
+
+        // 关键：和 BrowserCollector 一致用桌面模式。
+        // 手机模式访问 douyin.com 会拿到"抖音电脑版/抖音精选"推广页，没有登录入口；
+        // 桌面模式才是带「登录」按钮的正式站点。
+        cfg.defaultWebpagePreferences.preferredContentMode = .desktop
+        cfg.defaultWebpagePreferences.allowsContentJavaScript = true
+
+        if platform != .bilibili {
+            let clickLogin = """
+            (function(){
+              var texts = ['登录','立即登录','注册/登录','登录/注册','扫码登录','Log in','Sign in'];
+              var tries = 0;
+              var t = setInterval(function(){
+                if (++tries > 25) { clearInterval(t); return; }
+                var nodes = document.querySelectorAll('button, a, div[role=button], span, li');
+                for (var i=0;i<nodes.length;i++){
+                  var s = (nodes[i].innerText||'').trim();
+                  if (texts.indexOf(s) >= 0 && nodes[i].getBoundingClientRect().width > 0) {
+                    nodes[i].click(); clearInterval(t); return;
+                  }
+                }
+              }, 700);
+            })();
+            """
+            cfg.userContentController.addUserScript(
+                WKUserScript(source: clickLogin, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        }
+
         let wv = WKWebView(frame: .zero, configuration: cfg)
+        wv.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
         wv.navigationDelegate = context.coordinator
         if let u = URL(string: platform.loginURL) { wv.load(URLRequest(url: u)) }
         context.coordinator.start()
